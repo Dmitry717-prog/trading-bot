@@ -1,0 +1,7 @@
+streamlit
+pandas
+requests
+ta
+plotly
+scikit-learn
+xgboost
