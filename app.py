@@ -25,7 +25,17 @@ BET = st.sidebar.number_input("Ставка", value=10)
 def get_data(symbol):
     try:
         url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=300"
-        data = requests.get(url).json()
+
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
+
+        response = requests.get(url, headers=headers, timeout=10)
+
+        if response.status_code != 200:
+            return pd.DataFrame()
+
+        data = response.json()
 
         if not data or isinstance(data, dict):
             return pd.DataFrame()
