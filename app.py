@@ -23,28 +23,41 @@ BET = st.sidebar.number_input("Ставка", value=10)
 
 # === DATA ===
 def get_data(symbol):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=300"
-    data = requests.get(url).json()
+    try:
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=300"
+        data = requests.get(url).json()
 
-    df = pd.DataFrame(data, columns=[
-        "time","open","high","low","close","volume",
-        "ct","qv","n","tbb","tbq","ignore"
-    ])
+        if not data or isinstance(data, dict):
+            return pd.DataFrame()
 
-    df["close"] = df["close"].astype(float)
-    df["high"] = df["high"].astype(float)
-    df["low"] = df["low"].astype(float)
+        df = pd.DataFrame(data, columns=[
+            "time","open","high","low","close","volume",
+            "ct","qv","n","tbb","tbq","ignore"
+        ])
 
-    return df
+        df["close"] = df["close"].astype(float)
+        df["high"] = df["high"].astype(float)
+        df["low"] = df["low"].astype(float)
+
+        return df
+
+    except:
+        return pd.DataFrame()
 
 # === FEATURES ===
 def prepare(df):
+    if df is None or df.empty or len(df) < 20:
+        return None, None
+
     df["ema"] = ta.trend.ema_indicator(df["close"], window=10)
     df["rsi"] = ta.momentum.rsi(df["close"], window=14)
     df["atr"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"])
 
     df["target"] = (df["close"].shift(-3) > df["close"]).astype(int)
     df = df.dropna()
+
+    if df.empty:
+        return None, None
 
     X = df[["ema","rsi","atr"]]
     y = df["target"]
@@ -53,23 +66,44 @@ def prepare(df):
 
 # === TRAIN ===
 def train(X, y):
+    if X is None or y is None or len(X) < 10:
+        return None, 0
+
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+
     model = XGBClassifier(n_estimators=100)
     model.fit(X_train, y_train)
+
     acc = accuracy_score(y_test, model.predict(X_test))
     return model, acc
 
 # === LOAD ===
 df = get_data(SYMBOL)
-X, y = prepare(df)
 
+if df is None or df.empty:
+    st.error("❌ Нет данных с Binance")
+    st.stop()
+
+result = prepare(df)
+
+if result == (None, None):
+    st.warning("⚠️ Недостаточно данных для анализа")
+    st.stop()
+
+X, y = result
+
+# === TRAIN BUTTON ===
 if st.button("🧠 Обучить AI"):
     model, acc = train(X, y)
-    st.session_state.model = model
-    st.success(f"Точность: {round(acc*100,2)}%")
+
+    if model:
+        st.session_state.model = model
+        st.success(f"Точность: {round(acc*100,2)}%")
+    else:
+        st.error("❌ Ошибка обучения")
 
 # === PREDICT ===
-if st.session_state.model:
+if st.session_state.model is not None:
     last = X.iloc[-1:]
     pred = st.session_state.model.predict(last)[0]
     prob = st.session_state.model.predict_proba(last)[0][pred]
@@ -95,4 +129,5 @@ fig = go.Figure(data=[go.Candlestick(
     low=df['low'],
     close=df['close']
 )])
+
 st.plotly_chart(fig, use_container_width=True)
