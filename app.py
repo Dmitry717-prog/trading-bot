@@ -3,8 +3,7 @@ import pandas as pd
 import requests
 import ta
 import os
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
+import time
 from xgboost import XGBClassifier
 
 # === TELEGRAM ===
@@ -18,6 +17,10 @@ def send_signal(text):
     except:
         pass
 
+# === STATE ===
+if "last_signal_time" not in st.session_state:
+    st.session_state.last_signal_time = 0
+
 # === DATA ===
 def get_data(symbol):
     try:
@@ -28,9 +31,7 @@ def get_data(symbol):
         if res.status_code != 200:
             return pd.DataFrame()
 
-        data = res.json()
-
-        df = pd.DataFrame(data, columns=[
+        df = pd.DataFrame(res.json(), columns=[
             "time","open","high","low","close","volume",
             "ct","qv","n","tbb","tbq","ignore"
         ])
@@ -43,50 +44,61 @@ def get_data(symbol):
     except:
         return pd.DataFrame()
 
-# === ML ===
+# === PREPARE ===
 def prepare(df):
-    if df.empty or len(df) < 50:
-        return None, None
-
-    df["ema"] = ta.trend.ema_indicator(df["close"], window=10)
-    df["rsi"] = ta.momentum.rsi(df["close"], window=14)
+    df["ema_fast"] = ta.trend.ema_indicator(df["close"], 9)
+    df["ema_slow"] = ta.trend.ema_indicator(df["close"], 21)
+    df["rsi"] = ta.momentum.rsi(df["close"], 14)
     df["atr"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"])
 
     df["target"] = (df["close"].shift(-3) > df["close"]).astype(int)
     df = df.dropna()
 
-    if df.empty:
-        return None, None
+    return df
 
-    return df[["ema","rsi","atr"]], df["target"]
+# === MODEL ===
+def train(df):
+    X = df[["ema_fast","ema_slow","rsi","atr"]]
+    y = df["target"]
 
-def train(X, y):
-    model = XGBClassifier(n_estimators=100)
+    model = XGBClassifier(n_estimators=120)
     model.fit(X, y)
+
     return model
 
-# === MAIN ===
-st.title("🤖 Signal Bot")
+# === FILTERS ===
+def market_filter(df):
+    # тренд
+    trend = df["ema_fast"].iloc[-1] > df["ema_slow"].iloc[-1]
 
-SYMBOL = st.selectbox("Пара", ["BTCUSDT", "ETHUSDT"])
+    # волатильность
+    atr = df["atr"].iloc[-1]
+    low_volatility = atr < df["atr"].mean()
+
+    if low_volatility:
+        return False
+
+    return True
+
+# === MAIN ===
+st.title("🚀 PRO Signal Bot")
+
+SYMBOL = st.selectbox("Пара", ["BTCUSDT","ETHUSDT"])
 
 df = get_data(SYMBOL)
 
 if df.empty:
-    st.error("Нет данных")
     st.stop()
 
-X, y = prepare(df)
+df = prepare(df)
 
-if X is None:
-    st.warning("Недостаточно данных")
-    st.stop()
+model = train(df)
 
-model = train(X, y)
+last = df.iloc[-1:]
+X_last = last[["ema_fast","ema_slow","rsi","atr"]]
 
-last = X.iloc[-1:]
-pred = model.predict(last)[0]
-prob = model.predict_proba(last)[0][pred]
+pred = model.predict(X_last)[0]
+prob = model.predict_proba(X_last)[0][pred]
 
 direction = "BUY" if pred else "SELL"
 confidence = int(prob * 100)
@@ -95,18 +107,28 @@ price = df["close"].iloc[-1]
 st.metric("Сигнал", direction)
 st.metric("Уверенность", f"{confidence}%")
 
-# === СИГНАЛ ===
-if confidence >= 75:
+# === SMART SIGNAL SYSTEM ===
+current_time = time.time()
+
+if (
+    confidence >= 75 and
+    market_filter(df) and
+    current_time - st.session_state.last_signal_time > 300
+):
     msg = f"""
-🚨 СИЛЬНЫЙ СИГНАЛ
+🚨 PRO SIGNAL
 
 📊 {direction}
 💰 Цена: {price}
 🧠 Уверенность: {confidence}%
 📈 {SYMBOL}
+
+⏱ Время: {time.strftime('%H:%M:%S')}
     """
+
     send_signal(msg)
-    st.success("Сигнал отправлен в Telegram")
+    st.session_state.last_signal_time = current_time
+    st.success("Сильный сигнал отправлен 🚀")
 
 else:
-    st.info("Сигнал слабый — пропуск")
+    st.info("Нет подходящего сигнала")
