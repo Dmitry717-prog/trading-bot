@@ -2,43 +2,33 @@ import streamlit as st
 import pandas as pd
 import requests
 import ta
-import plotly.graph_objects as go
+import os
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from xgboost import XGBClassifier
 
-st.set_page_config(page_title="Super ML Bot", layout="wide")
+# === TELEGRAM ===
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
-st.title("🚀 Super ML Trading Bot")
-
-# === STATE ===
-if "balance" not in st.session_state:
-    st.session_state.balance = 1000
-    st.session_state.history = []
-    st.session_state.model = None
-
-# === SETTINGS ===
-SYMBOL = st.sidebar.selectbox("Пара", ["BTCUSDT", "ETHUSDT"])
-BET = st.sidebar.number_input("Ставка", value=10)
+def send_signal(text):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": CHAT_ID, "text": text})
+    except:
+        pass
 
 # === DATA ===
 def get_data(symbol):
     try:
         url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=300"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=headers, timeout=10)
 
-        headers = {
-            "User-Agent": "Mozilla/5.0"
-        }
-
-        response = requests.get(url, headers=headers, timeout=10)
-
-        if response.status_code != 200:
+        if res.status_code != 200:
             return pd.DataFrame()
 
-        data = response.json()
-
-        if not data or isinstance(data, dict):
-            return pd.DataFrame()
+        data = res.json()
 
         df = pd.DataFrame(data, columns=[
             "time","open","high","low","close","volume",
@@ -50,13 +40,12 @@ def get_data(symbol):
         df["low"] = df["low"].astype(float)
 
         return df
-
     except:
         return pd.DataFrame()
 
-# === FEATURES ===
+# === ML ===
 def prepare(df):
-    if df is None or df.empty or len(df) < 20:
+    if df.empty or len(df) < 50:
         return None, None
 
     df["ema"] = ta.trend.ema_indicator(df["close"], window=10)
@@ -69,75 +58,55 @@ def prepare(df):
     if df.empty:
         return None, None
 
-    X = df[["ema","rsi","atr"]]
-    y = df["target"]
+    return df[["ema","rsi","atr"]], df["target"]
 
-    return X, y
-
-# === TRAIN ===
 def train(X, y):
-    if X is None or y is None or len(X) < 10:
-        return None, 0
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
-
     model = XGBClassifier(n_estimators=100)
-    model.fit(X_train, y_train)
+    model.fit(X, y)
+    return model
 
-    acc = accuracy_score(y_test, model.predict(X_test))
-    return model, acc
+# === MAIN ===
+st.title("🤖 Signal Bot")
 
-# === LOAD ===
+SYMBOL = st.selectbox("Пара", ["BTCUSDT", "ETHUSDT"])
+
 df = get_data(SYMBOL)
 
-if df is None or df.empty:
-    st.error("❌ Нет данных с Binance")
+if df.empty:
+    st.error("Нет данных")
     st.stop()
 
-result = prepare(df)
+X, y = prepare(df)
 
-if result == (None, None):
-    st.warning("⚠️ Недостаточно данных для анализа")
+if X is None:
+    st.warning("Недостаточно данных")
     st.stop()
 
-X, y = result
+model = train(X, y)
 
-# === TRAIN BUTTON ===
-if st.button("🧠 Обучить AI"):
-    model, acc = train(X, y)
+last = X.iloc[-1:]
+pred = model.predict(last)[0]
+prob = model.predict_proba(last)[0][pred]
 
-    if model:
-        st.session_state.model = model
-        st.success(f"Точность: {round(acc*100,2)}%")
-    else:
-        st.error("❌ Ошибка обучения")
-
-# === PREDICT ===
-if st.session_state.model is not None:
-    last = X.iloc[-1:]
-    pred = st.session_state.model.predict(last)[0]
-    prob = st.session_state.model.predict_proba(last)[0][pred]
-
-    direction = "BUY" if pred else "SELL"
-    confidence = int(prob * 100)
-else:
-    direction = "-"
-    confidence = 0
-
+direction = "BUY" if pred else "SELL"
+confidence = int(prob * 100)
 price = df["close"].iloc[-1]
 
-# === UI ===
-col1, col2, col3 = st.columns(3)
-col1.metric("Баланс", f"{st.session_state.balance}$")
-col2.metric("Сигнал", direction)
-col3.metric("Уверенность", f"{confidence}%")
+st.metric("Сигнал", direction)
+st.metric("Уверенность", f"{confidence}%")
 
-fig = go.Figure(data=[go.Candlestick(
-    x=df.index,
-    open=df['open'],
-    high=df['high'],
-    low=df['low'],
-    close=df['close']
-)])
+# === СИГНАЛ ===
+if confidence >= 75:
+    msg = f"""
+🚨 СИЛЬНЫЙ СИГНАЛ
 
-st.plotly_chart(fig, use_container_width=True)
+📊 {direction}
+💰 Цена: {price}
+🧠 Уверенность: {confidence}%
+📈 {SYMBOL}
+    """
+    send_signal(msg)
+    st.success("Сигнал отправлен в Telegram")
+
+else:
+    st.info("Сигнал слабый — пропуск")
